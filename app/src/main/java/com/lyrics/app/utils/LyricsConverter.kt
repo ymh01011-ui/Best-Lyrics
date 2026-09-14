@@ -68,7 +68,7 @@ object LyricsConverter {
         val pList = doc.getElementsByTagNameNS(NS_TT, "p")
 
         // Track agents across all <p> elements to assign V1/V2
-        val agentMap = mutableMapOf<String, String>() // agent id -> "V1"/"V2"
+        val agentMap = mutableMapOf<String, String>() // agent id -> "V1"/"V2" 
         var agentCounter = 0
 
         fun resolveAgent(agentId: String): String {
