@@ -18,13 +18,14 @@ jobs:
           distribution: 'temurin'
 
       - name: Setup Android SDK
-        uses: android-actions/setup-android@v3
+        uses: android-actions/setup-android@v4
+        with:
+          packages: ''
 
-      - name: Generate gradlew
-        run: gradle wrapper --gradle-version 8.11.1 --distribution-type bin
-
-      - name: Make gradlew executable
-        run: chmod +x gradlew
+      - name: Setup Gradle 8.11.1
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.11.1'
 
       - name: Generate Keystore
         run: |
@@ -36,10 +37,10 @@ jobs:
             -validity 10000 \
             -storepass 01011412881 \
             -keypass 01011412881 \
-            -dname "CN=BestLyrics, OU=App, O=App, L=Cairo, S=Cairo, C=EG"
+            -dname "CN=BestLyrics, OU=App, O=App, L=Cairo, ST=Cairo, C=EG"
 
       - name: Build Release APK
-        run: ./gradlew assembleRelease
+        run: gradle assembleRelease --stacktrace
 
       - name: Align APK
         run: |
