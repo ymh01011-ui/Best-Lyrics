@@ -445,5 +445,47 @@ object LyricsRepository {
         }
     }
 
+    // =========================
+    // 5. Apple Music 3 (Lossless archive)
+    // =========================
+    fun fetchLossless(song: SongInfo): LyricsResult? {
+        val title = cleanTitleFull(song.title)
+        val artist = cleanArtistPrimary(song.artist)
+        val searchUrl = buildString {
+            append("https://lyrics-api.binimum.org/?track=").append(encode(title))
+            append("&artist=").append(encode(artist))
+            if (song.duration > 0) append("&duration=").append(song.duration)
+        }
+        val body = getLossless(searchUrl) ?: return null
+        return try {
+            val arr = JSONObject(body).optJSONArray("results") ?: return null
+            val best = (0 until arr.length())
+                .mapNotNull { arr.optJSONObject(it) }
+                .filter { it.optString("lyricsUrl").startsWith("http") }
+                .minByOrNull { r ->
+                    val byWord = if (r.optString("timing_type") == "word") 0 else 1
+                    val drift = if (song.duration > 0) abs(r.optLong("duration") - song.duration) else 0L
+                    byWord * 1_000_000L + drift
+                } ?: return null
+            val ttml = getLossless(best.getString("lyricsUrl")) ?: return null
+            val converted = LyricsConverter.convertTtml(ttml)
+            if (converted.isBlank()) return null
+            val isLine = ttml.contains("itunes:timing=\"Line\"")
+            LyricsResult("Apple Music 3", converted, if (isLine) LyricsType.LINE else LyricsType.WORD)
+        } catch (e: Exception) { null }
+    }
+
+    private fun getLossless(url: String): String? = try {
+        val req = Request.Builder().url(url)
+            .header("Accept", "application/ttml+xml, application/xml, application/json")
+            .header("User-Agent", "Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/139.0.0.0 Mobile Safari/537.36")
+            .header("Referer", "https://lossless.wtf/")
+            .header("Origin", "https://lossless.wtf")
+            .build()
+        client.newCall(req).execute().use { r ->
+            if (r.isSuccessful) r.body?.string()?.takeIf { it.isNotBlank() } else null
+        }
+    } catch (e: Exception) { null }
+
     private fun encode(s: String) = java.net.URLEncoder.encode(s, "UTF-8")
 }
