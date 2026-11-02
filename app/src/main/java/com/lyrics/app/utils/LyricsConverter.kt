@@ -33,9 +33,15 @@ object LyricsConverter {
         return "%02d:%06.3f".format(m, s)
     }
 
+    // Background vocals: the whole line is wrapped as [bg:<start>word<end> ...] (no line timestamp)
+    private fun wrapBg(words: String): String = "[bg:${words.trimEnd()}]"
+
+    private fun stripParens(s: String): String = s.replace("(", "").replace(")", "")
+
     private fun avoidDuplicateTime(lines: List<String>): List<String> {
         val used = mutableSetOf<String>()
         return lines.map { line ->
+            if (line.startsWith("[bg:")) return@map line
             val match = Regex("""\[(.*?)]""").find(line)
             if (match == null) {
                 line
@@ -111,7 +117,7 @@ object LyricsConverter {
                         val subSpans = span.getElementsByTagNameNS(NS_TT, "span")
                         for (k in 0 until subSpans.length) {
                             val sub = subSpans.item(k) as Element
-                            val subText = sub.textContent ?: continue
+                            val subText = stripParens(sub.textContent ?: continue)
                             if (subText.isEmpty()) continue
                             val b = formatTime(parseTime(sub.getAttribute("begin")))
                             val e = formatTime(parseTime(sub.getAttribute("end")))
@@ -140,7 +146,7 @@ object LyricsConverter {
                 if (mainLine.isNotEmpty() && mainTime != null)
                     result.add("[$mainTime]${mainAgent}$mainLine")
                 if (bgLine.isNotEmpty() && bgTime != null)
-                    result.add("[$bgTime]bg: $bgLine")
+                    result.add(wrapBg(bgLine))
             }
         }
 
@@ -186,13 +192,20 @@ object LyricsConverter {
                 val spaces = text.substring(stripped.length)
 
                 if ("(" in text) insideBg = true
+                val toBg = insideBg
 
-                if (!insideBg) {
+                if (!toBg) {
                     if (mainStart == null) mainStart = start
                     mainLine += "<$start>$stripped<$end>$spaces"
                 } else {
-                    if (bgStart == null) bgStart = start
-                    bgLine += "<$start>$stripped<$end>$spaces"
+                    val shown = stripParens(stripped)
+                    if (shown.isEmpty()) {
+                        // paren-only syllable: drop it but keep its trailing space
+                        if (bgLine.isNotEmpty()) bgLine += spaces
+                    } else {
+                        if (bgStart == null) bgStart = start
+                        bgLine += "<$start>$shown<$end>$spaces"
+                    }
                 }
 
                 if (")" in text) insideBg = false
@@ -201,7 +214,7 @@ object LyricsConverter {
             if (mainLine.isNotBlank() && mainStart != null)
                 result.add("[$mainStart]$label$mainLine")
             if (bgLine.isNotBlank() && bgStart != null)
-                result.add("[$bgStart]bg: $bgLine")
+                result.add(wrapBg(bgLine))
         }
 
         return avoidDuplicateTime(result).joinToString("\n")
@@ -241,6 +254,17 @@ object LyricsConverter {
     // =========================
     fun toKaraoke2(lyrics: String): String {
         return lyrics.lines().joinToString("\n") { line ->
+            if (line.startsWith("[bg:")) {
+                val bgWords = Regex("""<([\d:.]+)>([^<]*)<([\d:.]+)>""").findAll(line).toList()
+                if (bgWords.isEmpty()) return@joinToString line
+                val body = StringBuilder()
+                for (i in bgWords.indices) {
+                    val w = bgWords[i]
+                    body.append("<${w.groupValues[1]}>${w.groupValues[2]}")
+                    body.append(if (i == bgWords.size - 1) "<${w.groupValues[3]}>" else " ")
+                }
+                return@joinToString "[bg:$body]"
+            }
             // Extract prefix label like "V1: " or "bg: " after timestamp
             val timeMatch = Regex("""^\[.*?]""").find(line) ?: return@joinToString line
             val afterTime = line.removePrefix(timeMatch.value)
@@ -270,6 +294,13 @@ object LyricsConverter {
     // =========================
     fun toSynced(lyrics: String): String {
         return lyrics.lines().joinToString("\n") { line ->
+            if (line.startsWith("[bg:")) {
+                val first = Regex("""<([\d:.]+)>""").find(line)?.groupValues?.get(1)
+                    ?: return@joinToString line
+                val bgText = line.replace(Regex("""<.*?>"""), "")
+                    .removePrefix("[bg:").removeSuffix("]").trim()
+                return@joinToString "[$first]bg: $bgText"
+            }
             val timeMatch = Regex("""^\[(.*?)]""").find(line) ?: return@joinToString line
             val time = timeMatch.groupValues[1]
             val text = line.replace(Regex("""<.*?>"""), "").replace(Regex("""^\[.*?]"""), "").trim()
@@ -282,6 +313,10 @@ object LyricsConverter {
     // =========================
     fun toPlain(lyrics: String): String {
         return lyrics.lines().joinToString("\n") { line ->
+            if (line.startsWith("[bg:")) {
+                return@joinToString "bg: " + line.replace(Regex("""<.*?>"""), "")
+                    .removePrefix("[bg:").removeSuffix("]").trim()
+            }
             line.replace(Regex("""<.*?>"""), "").replace(Regex("""^\[.*?]"""), "").trim()
         }.trim()
     }
