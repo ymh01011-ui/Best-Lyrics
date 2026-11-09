@@ -117,13 +117,15 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 val plusDeferred = async { runCatching { LyricsRepository.fetchLyricsPlus(song) }.getOrNull() }
                 val lrcLibDeferred = async { runCatching { LyricsRepository.fetchLrcLib(song) }.getOrNull() }
                 val losslessDeferred = async { runCatching { LyricsRepository.fetchLossless(song) }.getOrNull() }
+                val kuGouDeferred = async { runCatching { LyricsRepository.fetchKuGou(song) }.getOrNull() }
 
                 listOfNotNull(
                     appleDeferred.await(),
                     paxsenixDeferred.await(),
                     plusDeferred.await(),
                     lrcLibDeferred.await(),
-                    losslessDeferred.await()
+                    losslessDeferred.await(),
+                    kuGouDeferred.await()
                 )
             }
             if (results.isEmpty()) {
