@@ -487,5 +487,129 @@ object LyricsRepository {
         }
     } catch (e: Exception) { null }
 
+    // =========================
+    // 6. KuGou (KRC, word-timed)
+    // =========================
+    fun fetchKuGou(song: SongInfo): LyricsResult? {
+        val title = cleanTitleFull(song.title)
+        if (title.isBlank()) return null
+        val durationMs = song.duration * 1000L
+        val (id, key) = searchKuGou(title, cleanArtistPrimary(song.artist), durationMs) ?: return null
+        val krc = downloadKuGou(id, key) ?: return null
+        val json = krcToJson(krc, title) ?: return null
+        val converted = LyricsConverter.convertJsonLyrics(json)
+        if (converted.isBlank()) return null
+        return LyricsResult("KuGou", converted, LyricsType.WORD)
+    }
+
+    /** The id and accesskey of the candidate closest in length, or null. */
+    private fun searchKuGou(title: String, artist: String, durationMs: Long): Pair<String, String>? {
+        val url = buildString {
+            append("https://lyrics.kugou.com/search?ver=1&man=yes&client=pc&hash=")
+            append("&keyword=").append(encode("$artist - $title"))
+            if (durationMs > 0) append("&duration=").append(durationMs)
+        }
+        val body = getKuGou(url) ?: return null
+        val candidates = runCatching { JSONObject(body).optJSONArray("candidates") }.getOrNull() ?: return null
+        val best = (0 until candidates.length())
+            .mapNotNull { candidates.optJSONObject(it) }
+            .filter { it.optString("id").isNotEmpty() && it.optString("accesskey").isNotEmpty() }
+            // further apart than 4s, it is another recording
+            .filter { durationMs <= 0 || abs(it.optLong("duration") - durationMs) <= 4_000L }
+            .minByOrNull { if (durationMs > 0) abs(it.optLong("duration") - durationMs) else 0L }
+            ?: return null
+        return best.optString("id") to best.optString("accesskey")
+    }
+
+    private fun downloadKuGou(id: String, key: String): String? {
+        val url = "https://lyrics.kugou.com/download?ver=1&client=pc&fmt=krc&charset=utf8&id=${encode(id)}&accesskey=${encode(key)}"
+        val body = getKuGou(url) ?: return null
+        val content = runCatching { JSONObject(body).optString("content") }.getOrNull()
+            ?.takeIf { it.isNotEmpty() } ?: return null
+        return runCatching { decryptKrc(android.util.Base64.decode(content, android.util.Base64.DEFAULT)) }.getOrNull()
+    }
+
+    private fun getKuGou(url: String): String? = try {
+        val req = Request.Builder().url(url)
+            .header("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
+            .build()
+        client.newCall(req).execute().use { r ->
+            if (r.isSuccessful) r.body?.string()?.takeIf { it.isNotBlank() } else null
+        }
+    } catch (e: Exception) { null }
+
+    // KRC: base64, a "krc1" header, a fixed 16-byte XOR, then zlib
+    private val KRC_KEY = intArrayOf(64, 71, 97, 119, 94, 50, 116, 71, 81, 54, 49, 45, 206, 210, 110, 105)
+
+    private fun decryptKrc(raw: ByteArray): String? {
+        if (raw.size <= 4 || String(raw, 0, 4, Charsets.US_ASCII) != "krc1") return null
+        val body = ByteArray(raw.size - 4) { i -> (raw[i + 4].toInt() xor KRC_KEY[i % KRC_KEY.size]).toByte() }
+        val inflater = java.util.zip.Inflater()
+        inflater.setInput(body)
+        val out = java.io.ByteArrayOutputStream()
+        val buffer = ByteArray(8192)
+        while (!inflater.finished()) {
+            val n = inflater.inflate(buffer)
+            if (n == 0 && (inflater.needsInput() || inflater.needsDictionary())) break
+            out.write(buffer, 0, n)
+        }
+        inflater.end()
+        return out.toString("UTF-8")
+    }
+
+    private val KRC_LINE = Regex("""^\[(\d+),(\d+)]""")
+    private val KRC_WORD = Regex("""<(\d+),(\d+),\d+>([^<]*)""")
+
+    /**
+     * KRC lines are `[start,length]` and words `<offset,length,0>text` (offset from the
+     * line start). This turns them into the LyricsPlus JSON shape so that
+     * LyricsConverter.convertJsonLyrics does the rest (V1 label, (bg) words, timings).
+     * Credit lines before the first sung line ("作词：", "Lyrics by:") are dropped.
+     */
+    private fun krcToJson(krc: String, title: String): JSONObject? {
+        class KrcLine(val text: String, val syllables: JSONArray)
+        val lines = mutableListOf<KrcLine>()
+
+        for (raw in krc.lineSequence()) {
+            val head = KRC_LINE.find(raw) ?: continue
+            val start = head.groupValues[1].toLong()
+            val pieces = KRC_WORD.findAll(raw.substring(head.range.last + 1)).toList()
+            val text = pieces.joinToString("") { it.groupValues[3] }.trim()
+            if (text.isEmpty()) continue
+
+            val syllables = JSONArray()
+            var last: JSONObject? = null
+            for (p in pieces) {
+                val piece = p.groupValues[3]
+                val core = piece.trim()
+                if (core.isEmpty()) {
+                    // spaces-only piece: it belongs to the previous word's tail
+                    last?.let { it.put("text", it.getString("text") + piece) }
+                    continue
+                }
+                // keep spaces trailing, as the converter expects
+                val lead = piece.substring(0, piece.length - piece.trimStart().length)
+                if (lead.isNotEmpty()) last?.let { it.put("text", it.getString("text") + lead) }
+                val trail = piece.substring(piece.trimEnd().length)
+                last = JSONObject()
+                    .put("text", core + trail)
+                    .put("time", start + p.groupValues[1].toLong())
+                    .put("duration", p.groupValues[2].toLong())
+                syllables.put(last)
+            }
+            lines.add(KrcLine(text, syllables))
+        }
+
+        val firstSung = lines.indexOfFirst { l ->
+            !(l.text.contains('：') || l.text.contains(':') ||
+                (l.text.startsWith(title, ignoreCase = true) && l.text.contains(" - ")))
+        }
+        if (firstSung < 0) return null
+
+        val arr = JSONArray()
+        for (l in lines.drop(firstSung)) arr.put(JSONObject().put("syllabus", l.syllables))
+        return JSONObject().put("lyrics", arr)
+    }
+
     private fun encode(s: String) = java.net.URLEncoder.encode(s, "UTF-8")
 }
